@@ -26,11 +26,16 @@ BACKGROUND:
   (for dark cards) and keeps the best result.
 
 Usage:
-    pip install paddleocr paddlepaddle opencv-python openpyxl
-    python extract_numbers.py images_folder results.xlsx
-    python extract_numbers.py images_folder results.xlsx --debug        # also saves *_debug.jpg
-    python extract_numbers.py images_folder results.xlsx --layout=left  # force one card type
-    python extract_numbers.py images_folder results.xlsx --len=15       # force the code length
+    pip install -r requirements.txt
+    python -m pixel2num.extract_numbers images_folder results.xlsx
+    python -m pixel2num.extract_numbers images_folder results.xlsx --debug        # also saves *_debug.jpg
+    python -m pixel2num.extract_numbers images_folder results.xlsx --layout=left  # force one card type
+    python -m pixel2num.extract_numbers images_folder results.xlsx --len=15       # force the code length
+
+Library use (the Mattermost bot): importing this module does NOT load PaddleOCR.
+The engine is created on the first call to get_ocr() (or explicitly with load_ocr()).
+Call build_records() with Entry items, mark_repeated(), then workbook_bytes().
+Messages go through the "pixel2num.extract" logger and never contain charge codes.
 
 Excel columns:  Image | Counter | Charge Code | Status
   - Image        = image file name
@@ -48,22 +53,28 @@ Excel columns:  Image | Counter | Charge Code | Status
     counters cannot be trusted, so every row of that image is marked failed
     (the codes stay in the sheet so you can check them by hand).
 """
+import io
+import logging
 import re
 import sys
 from collections import Counter, defaultdict
 from itertools import combinations
 from pathlib import Path
+from typing import NamedTuple, Optional
 
 import cv2
 import numpy as np
 from openpyxl import Workbook
 from openpyxl.styles import Alignment, Font, PatternFill
-from paddleocr import PaddleOCR
+
+from .ranges import NAME_RE
+
+LOG = logging.getLogger("pixel2num.extract")
 
 # ----------------------------- CONFIG ---------------------------------
-CODE_LEN = None  # None = find the code length of every image by itself. Or force e.g. 15
+CODE_LEN = None  # default: None = find the code length of every image by itself. Or force e.g. 15
 RIGHT_SIDE_FROM = 0.50  # teal cards: only look at text right of 50% of the image width
-LAYOUT = "auto"  # "auto" = try every layout below and keep the best one, or one name
+LAYOUT = "auto"  # default: "auto" = try every layout below and keep the best one, or one name
 LAYOUTS = {  # where the code sits: (from, to) as a fraction of the image width
     "right": (RIGHT_SIDE_FROM, 1.00),
     "left": (0.27, 0.60),
@@ -76,24 +87,47 @@ MIN_SHORT_DIGITS = 2  # 2-3 digit pieces are only used when they touch a code li
 MIN_PARTIAL_DIGITS = 8  # a line with fewer digits than this is noise, not a card
 LINE_GAP = 1.5  # two pieces further apart than 1.5 x text height are different texts
 SUCCESS, FAILED, REPEATED = "succeeded", "failed", "repeated"
-NAME_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")  # START-END
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 # ----------------------------------------------------------------------
 
-try:  # PaddleOCR 3.x
-    ocr = PaddleOCR(
-        lang="en",
-        use_doc_orientation_classify=False,
-        use_doc_unwarping=False,
-        use_textline_orientation=False,
-        enable_mkldnn=False,
-    )
-except (TypeError, ValueError):  # PaddleOCR 2.x
-    ocr = PaddleOCR(lang="en", use_angle_cls=False)
+class Entry(NamedTuple):
+    """One image to read. start/count come from the caller (the CLI parses the file name).
+    start=None means "no valid range": the image gets one failed row."""
+    name: str  # shown in the Image column
+    path: Path
+    start: Optional[int]
+    count: int = 0
+
+
+_ocr = None
+
+
+def get_ocr():
+    """Create the PaddleOCR engine on first use and keep it for the whole process."""
+    global _ocr
+    if _ocr is None:
+        from paddleocr import PaddleOCR  # imported here so that importing this module stays light
+        try:  # PaddleOCR 3.x
+            _ocr = PaddleOCR(
+                lang="en",
+                use_doc_orientation_classify=False,
+                use_doc_unwarping=False,
+                use_textline_orientation=False,
+                enable_mkldnn=False,
+            )
+        except (TypeError, ValueError):  # PaddleOCR 2.x
+            _ocr = PaddleOCR(lang="en", use_angle_cls=False)
+    return _ocr
+
+
+def load_ocr():
+    """Load the engine now (slow, once) instead of during the first image."""
+    get_ocr()
 
 
 def run_ocr(img):
     """Return [(text, score, (x1, y1, x2, y2)), ...] for PaddleOCR 2.x and 3.x."""
+    ocr = get_ocr()
     items = []
     try:
         for page in ocr.predict(img):
@@ -311,18 +345,20 @@ def parse_name(path):
     return start, end - start + 1
 
 
-def process(path, start, count, debug=False):
+def process(path, start, count, debug=False, layout=None, code_len=None):
     img = cv2.imread(str(path))
     if img is None:
         return None
     big = cv2.resize(img, None, fx=UPSCALE, fy=UPSCALE, interpolation=cv2.INTER_CUBIC)
-    layouts = list(LAYOUTS) if LAYOUT == "auto" else [LAYOUT]
+    layout = layout or LAYOUT
+    code_len = code_len or CODE_LEN
+    layouts = list(LAYOUTS) if layout == "auto" else [layout]
 
     best, best_score = None, None
     for variant, pic in make_variants(big):
         items = run_ocr(pic)
-        for layout in layouts:
-            res = read_layout(items, big.shape[1], layout, count, CODE_LEN)
+        for name in layouts:
+            res = read_layout(items, big.shape[1], name, count, code_len)
             if res is None:
                 continue
             ok = res["reliable"]
@@ -335,7 +371,7 @@ def process(path, start, count, debug=False):
         if best and best["good"] >= count and best["reliable"]:
             break  # everything was read - no need to try the other versions
     if best is None:
-        best = {"slots": {}, "extras": [], "reliable": True, "code_len": CODE_LEN or 0,
+        best = {"slots": {}, "extras": [], "reliable": True, "code_len": code_len or 0,
                 "layout": "-", "variant": "-", "good": 0}
 
     if debug:
@@ -356,42 +392,52 @@ def natural_key(p):
     return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
 
 
-def build_records(files, debug=False):
-    """Return [[image, counter, code, status], ...] in image order, top card first."""
-    records = []
+def entries_from_files(files):
+    """CLI helper: take the range from each file name (START-END.jpg)."""
+    entries = []
     for p in files:
         parsed = parse_name(p)
-        if parsed is None:
-            records.append([p.name, "", "", FAILED])
-            print(f"{p.name}: bad file name - use START-END.jpg (example 81-100.jpg)")
-            continue
-        start, count = parsed
+        entries.append(Entry(p.name, p, *(parsed if parsed else (None, 0))))
+    return entries
 
-        res = process(p, start, count, debug)
+
+def build_records(entries, debug=False, layout=None, code_len=None):
+    """Return [[image, counter, code, status], ...] in entry order, top card first."""
+    records = []
+    for e in entries:
+        name, start, count = e.name, e.start, e.count
+        if start is None:
+            records.append([name, "", "", FAILED])
+            LOG.warning("%s: bad file name - use START-END.jpg (example 81-100.jpg)", name)
+            continue
+
+        res = process(e.path, start, count, debug, layout, code_len)
         if res is None:
             for k in range(count):
-                records.append([p.name, start + k, "", FAILED])
-            print(f"{p.name}: could not open image")
+                records.append([name, start + k, "", FAILED])
+            LOG.warning("%s: could not open image", name)
             continue
-        slots, extras, code_len = res["slots"], res["extras"], res["code_len"]
+        slots, extras, code_len_found = res["slots"], res["extras"], res["code_len"]
 
         if slots and max(slots) < count and res["reliable"]:
-            print(f"  warning: {p.name} - nothing found after counter {start + max(slots) - 1}; "
-                  f"missing cards are assumed to be at the END of the stack")
+            LOG.warning("  warning: %s - nothing found after counter %s; "
+                        "missing cards are assumed to be at the END of the stack",
+                        name, start + max(slots) - 1)
         if not res["reliable"]:
-            print(f"  warning: {p.name} - cards overlap with uneven spacing and {len(slots) + len(extras)} "
-                  f"codes were found, but the file name says {count}. The counters cannot be "
-                  f"trusted, so every row of this image is marked {FAILED} (check it with --debug)")
+            LOG.warning("  warning: %s - cards overlap with uneven spacing and %s "
+                        "codes were found, but the file name says %s. The counters cannot be "
+                        "trusted, so every row of this image is marked %s (check it with --debug)",
+                        name, len(slots) + len(extras), count, FAILED)
         ok = 0
         for k in range(1, count + 1):
             r = slots.get(k)
             digits = r["digits"] if r else ""
-            good = bool(digits) and len(digits) == code_len and res["reliable"]
+            good = bool(digits) and len(digits) == code_len_found and res["reliable"]
             ok += good
-            records.append([p.name, start + k - 1, digits, SUCCESS if good else FAILED])
-        print(f"{p.name}: {ok}/{count} codes read "
-              f"[layout={res['layout']}, {code_len} digits, picture={res['variant']}]"
-              + (f", {len(extras)} extra detection(s) ignored" if extras else ""))
+            records.append([name, start + k - 1, digits, SUCCESS if good else FAILED])
+        LOG.info("%s: %s/%s codes read [layout=%s, %s digits, picture=%s]%s",
+                 name, ok, count, res["layout"], code_len_found, res["variant"],
+                 f", {len(extras)} extra detection(s) ignored" if extras else "")
     return records
 
 
@@ -407,7 +453,7 @@ def mark_repeated(records):
     return where
 
 
-def write_excel(records, out_file):
+def build_workbook(records):
     wb = Workbook()
     ws = wb.active
     ws.title = "Codes"
@@ -431,27 +477,40 @@ def write_excel(records, out_file):
         if fill:
             for c in range(1, 5):
                 ws.cell(row=row, column=c).fill = fill
-    wb.save(out_file)
+    return wb
+
+
+def write_excel(records, out_file):
+    """Save to a path or to a binary file object."""
+    build_workbook(records).save(out_file)
+
+
+def workbook_bytes(records):
+    """The .xlsx file as bytes (what the bot uploads)."""
+    buffer = io.BytesIO()
+    write_excel(records, buffer)
+    return buffer.getvalue()
 
 
 def main():
-    global LAYOUT, CODE_LEN
+    logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     debug = "--debug" in sys.argv
+    layout, code_len = LAYOUT, CODE_LEN
     for a in sys.argv[1:]:
         if a.startswith("--layout="):
-            LAYOUT = a.split("=", 1)[1].strip().lower()
-            if LAYOUT != "auto" and LAYOUT not in LAYOUTS:
-                sys.exit(f"Unknown layout '{LAYOUT}'. Use one of: auto, {', '.join(LAYOUTS)}")
+            layout = a.split("=", 1)[1].strip().lower()
+            if layout != "auto" and layout not in LAYOUTS:
+                sys.exit(f"Unknown layout '{layout}'. Use one of: auto, {', '.join(LAYOUTS)}")
         elif a.startswith("--len="):
-            CODE_LEN = int(a.split("=", 1)[1])
+            code_len = int(a.split("=", 1)[1])
     folder = Path(args[0]) if args else Path(".")
     out_file = Path(args[1] if len(args) > 1 else "results.xlsx").with_suffix(".xlsx")
     files = sorted((p for p in folder.iterdir()
                     if p.suffix.lower() in IMAGE_EXTS and not p.stem.endswith("_debug")),
                    key=natural_key)
 
-    records = build_records(files, debug)
+    records = build_records(entries_from_files(files), debug, layout, code_len)
     repeated = mark_repeated(records)  # final check across ALL images
 
     try:
@@ -460,7 +519,7 @@ def main():
         print(f"\nCannot write {out_file} - close it in Excel and run again.")
         return
 
-    if repeated:
+    if repeated:  # console only: the operator's own terminal
         print("\nREPEATED codes:")
         for code, places in repeated.items():
             print(f"  {code}: " + ", ".join(f"{img} #{cnt}" for img, cnt in places))

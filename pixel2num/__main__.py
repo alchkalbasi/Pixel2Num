@@ -19,7 +19,9 @@ def main():
         for sig in (signal.SIGTERM, signal.SIGINT):
             signal.signal(sig, lambda *_: stop.set())
         bot = Bot(config)
-        logging.info("Bot connected; polling direct messages")
+        logging.info("Bot connected; loading OCR engine (first start can take a minute)")
+        bot.bridge.load()
+        logging.info("OCR engine ready; polling direct messages")
         try:
             while not stop.is_set():
                 try:

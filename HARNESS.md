@@ -1,13 +1,13 @@
 # HARNESS — how SPEC 001 is checked
 
-Status: **DRAFT — awaiting approval**
+Status: **IN USE**
 
 This file defines the checks that prove [SPEC.md](SPEC.md) is met. A change is not finished until its level passes. The levels run from fast and cheap to slow and real, and each level assumes the one before it passes.
 
 | Level | What | Needs Paddle? | Needs Docker? | Needs Mattermost? | Who runs it |
 | --- | --- | --- | --- | --- | --- |
 | L0 | Static and import checks | no | no | no | Claude / CI, every change |
-| L1 | Unit tests (bot logic, fake extractor) | no | no | no | Claude / CI, every change |
+| L1 | Unit tests (bot logic, fake bridge) | no | no | no | Claude / CI, every change |
 | L2 | Extractor parity on real photos | yes | no | no | Claude locally, when the extractor changes |
 | L3 | Container build and runtime | yes (in image) | yes | no | Claude locally, when deploy files change |
 | L4 | Live smoke test | yes | yes | yes | Human, once before rollout |
@@ -34,7 +34,7 @@ python3 -m venv .venv-ocr
 
 ```sh
 .venv/bin/python -m compileall -q pixel2num tests
-.venv/bin/python -c "import pixel2num.bot, pixel2num.extractor"
+.venv/bin/python -c "import pixel2num.bot, pixel2num.bridge"
 ```
 
 Pass criteria:
@@ -50,7 +50,7 @@ Pass criteria:
 
 Rules:
 - Use only the `unittest` standard library. The existing tests already do.
-- Bot tests use the existing `FakeMattermost` and a new `FakeExtractor` that records the `(display_name, start, count)` it gets and returns a small valid workbook.
+- Bot tests use the existing `FakeMattermost` and a `Mock` bridge that records the `(display_name, start, count)` it gets and returns a small valid workbook.
 - Pure library functions (`parse_name`, `mark_repeated`, `write_excel` to a stream, range parsing) are tested directly. They don't need OCR.
 - All existing tests in `tests/test_bot.py` must still pass, except `TransportTests.test_multipart_contract_and_auth_separation`. That test covers the removed HTTP backend and is deleted together with it (R-JOB-1).
 
@@ -66,14 +66,15 @@ Required new cases (names are suggestions):
 | `test_range_persisted_across_restart` | R-RANGE-5 |
 | `test_collect_reply_lists_ranges` | R-RANGE-6 |
 | `test_caption_is_not_a_command` (image + caption `process` does not start a job) | R-RANGE-7 |
-| `test_bmp_accepted` | R-INTAKE-1 |
+| `test_overlapping_ranges_warn_but_are_allowed` | R-RANGE-8 |
+| `test_bmp_accepted_and_default_limit` | R-INTAKE-1, R-INTAKE-3 |
 | `test_default_max_images_is_50` | R-INTAKE-3 |
-| `test_extractor_receives_batch_order_and_ranges` | R-JOB-1, R-JOB-2 |
+| `test_bridge_receives_batch_order_and_ranges` | R-JOB-1, R-JOB-2 |
 | `test_duplicate_filenames_do_not_collide` (two `image.png` give two distinct temp files) | R-JOB-3 |
 | `test_temp_dir_removed_on_success_and_failure` | R-JOB-3, R-SEC-2 |
 | `test_ready_message_has_counts_not_codes` | R-JOB-6, R-SEC-1 |
-| `test_extractor_exception_fails_job_then_retry_reruns` | R-JOB-7 |
-| `test_invalid_workbook_from_extractor_rejected` | R-JOB-8 |
+| `test_bridge_exception_fails_job_then_retry_reruns` | R-JOB-7 |
+| `test_invalid_workbook_from_bridge_rejected` | R-JOB-8 |
 | `test_config_backend_vars_not_required_and_new_vars_validated` | R-CFG-1, R-CFG-2 |
 | `test_no_codes_in_logs` (run a job with `assertLogs` and check that no fake code string appears) | R-SEC-1, R-LIB-5 |
 
@@ -89,7 +90,7 @@ tests/fixtures/cards/          # git-ignored; or set PIXEL2NUM_FIXTURES=/path/ou
 ```
 
 Procedure:
-1. **Step 0, before any refactor:** run the original script from the baseline commit on the fixture folder. Save its records (image, counter, code, status) to `baseline.json`. A small throwaway helper may do this. The helper is harness code and is never shipped.
+1. **Step 0, before any refactor:** run the original script from the baseline commit on the fixture folder. Save its records (image, counter, code, status) to `tests/fixtures/baseline.json`. A copy of the original script is kept in `tests/fixtures/extract_numbers_ORIGINAL.py` (git-ignored) for regenerating it. The helper that runs it is throwaway and never shipped.
 2. After every extractor change, run:
    ```sh
    PIXEL2NUM_FIXTURES=tests/fixtures/cards .venv-ocr/bin/python -m unittest tests.test_extract_parity -v
@@ -106,7 +107,7 @@ If a later spec deliberately changes extraction results, the baseline is regener
 docker compose build
 # R-OCR-3: Paddle imports and the engine loads, with NO network (proves R-OCR-2):
 docker run --rm --network none --read-only --tmpfs /tmp pixel2num-bot \
-  python -c "from pixel2num.extractor import Extractor; Extractor.load_default(); print('ok')"
+  python -c "from pixel2num.bridge import Bridge; Bridge.load_default(); print('ok')"
 # Parity inside the image, with fixtures mounted read-only:
 docker run --rm --network none --read-only --tmpfs /tmp \
   -v "$PWD/tests/fixtures/cards:/fixtures:ro" -e PIXEL2NUM_FIXTURES=/fixtures \
@@ -115,7 +116,7 @@ docker run --rm --network none --read-only --tmpfs /tmp \
 docker image ls pixel2num-bot      # record image size
 ```
 
-The command names above (`Extractor.load_default`, the image tag) are placeholders. Step 4 fixes the real ones and updates this file.
+The command names above (`Bridge.load_default`, the image tag) are placeholders. Step 4 fixes the real ones and updates this file.
 
 Pass criteria:
 - The image builds from a clean cache.

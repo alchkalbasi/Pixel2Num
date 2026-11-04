@@ -4,3 +4,5 @@ __pycache__/
 *.py[cod]
 data/
 .pytest_cache/
+.venv-ocr/
+tests/fixtures/

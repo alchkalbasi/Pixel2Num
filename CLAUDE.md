@@ -23,10 +23,10 @@ The full commands for each level are in HARNESS.md.
 ## Layout
 
 - `pixel2num/bot.py` holds the polling loop, the per-user batches, and the SQLite state machine (`queued → processing → ready → uploaded → done/failed`). Keep this state machine. It already handles restarts and retries.
-- `pixel2num/api.py` holds the Mattermost REST client, `validate_report`, and `InputError`. An `InputError` message is shown to the user, so it must be safe to display.
+- `pixel2num/bot_toolbox.py` holds the Mattermost REST client, `validate_report`, and `InputError`. An `InputError` message is shown to the user, so it must be safe to display.
 - `pixel2num/extract_numbers.py` is the OCR extractor library plus its CLI. It uses PaddleOCR, OpenCV and openpyxl.
-- `pixel2num/extractor.py` (planned) is the thin adapter the bot calls with `convert(job, images) -> bytes`.
-- `tests/` uses `unittest` only, with fakes for Mattermost and the extractor.
+- `pixel2num/bridge.py` is the thin adapter the bot calls with `convert(job, images) -> bytes`.
+- `tests/` uses `unittest` only, with fakes for Mattermost and the bridge.
 
 ## Rules
 
