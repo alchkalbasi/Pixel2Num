@@ -1,8 +1,6 @@
-.git
-.env
-.venv
-data
-__pycache__
+# Allow-list: only what the image needs is sent to the build.
+*
+!requirements.txt
+!pixel2num/
 **/__pycache__
-**/*.pyc
-tests
+**/*.py[cod]

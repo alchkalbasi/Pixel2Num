@@ -1,0 +1,33 @@
+name: pixel2num
+services:
+  bot:
+    image: pixel2num-bot
+    build:
+      context: .
+      target: runtime
+    platform: linux/amd64
+    env_file: .env
+    restart: unless-stopped
+    init: true
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    tmpfs:
+      - /tmp:rw,nosuid,nodev,size=512m  # job images (MAX_BATCH_BYTES) + report
+    volumes:
+      - bot-data:/app/data
+    deploy:
+      resources:
+        limits:
+          memory: 1g  # adjust after measuring (HARNESS L3)
+          pids: 512
+    stop_grace_period: 600s  # a running job is allowed to finish
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "5"
+
+volumes:
+  bot-data:
