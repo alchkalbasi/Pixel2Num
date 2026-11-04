@@ -1,0 +1,4 @@
+# Bot-only environment for fast tests (HARNESS L0/L1): no Paddle, no OpenCV.
+requests==2.32.5
+openpyxl==3.1.5
+numpy==2.3.5

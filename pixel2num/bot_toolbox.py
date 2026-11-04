@@ -1,11 +1,12 @@
 import io
-import json
 import zipfile
+from collections import Counter
 
 import requests
+from openpyxl import load_workbook
 
 XLSX_TYPE = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
-IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/tiff"}
+IMAGE_TYPES = {"image/png", "image/jpeg", "image/webp", "image/tiff", "image/bmp"}
 
 
 class InputError(Exception):
@@ -31,7 +32,14 @@ def validate_report(data):
             if any(n.lower().endswith("vbaproject.bin") for n in names):
                 raise ValueError("Macros are not allowed")
     except (zipfile.BadZipFile, ValueError) as error:
-        raise InputError("The backend did not return an .xlsx workbook.") from error
+        raise InputError("The extractor did not produce a valid .xlsx workbook.") from error
+
+
+def summarize_report(data):
+    """Counts of the Status column (succeeded/failed/repeated). Never returns codes."""
+    sheet = load_workbook(io.BytesIO(data), read_only=True).active
+    counts = Counter(row[3] for row in sheet.iter_rows(min_row=2, values_only=True) if len(row) > 3)
+    return ", ".join(f"{counts[k]} {k}" for k in ("succeeded", "failed", "repeated"))
 
 
 class Mattermost:
@@ -63,25 +71,3 @@ class Mattermost:
     def upload(self, channel_id, job_id, data):
         with self.request("POST", "/files", data={"channel_id": channel_id}, files={"files": (f"pixel2num-{job_id}.xlsx", data, XLSX_TYPE)}) as response:
             return response.json()["file_infos"][0]["id"]
-
-
-class Backend:
-    def __init__(self, config):
-        self.config = config
-        self.session = requests.Session()
-        if config.backend_token:
-            self.session.headers["Authorization"] = f"Bearer {config.backend_token}"
-
-    def convert(self, job, images):
-        c = self.config
-        metadata = {"job_id": job["id"], "user_id": job["user_id"], "channel_id": job["channel_id"], "format_id": c.format_id}
-        # A separate session ensures the Mattermost token never reaches the backend.
-        with self.session.post(c.backend_url, data={"metadata": json.dumps(metadata)}, files=[("images", image) for image in images], headers={"Idempotency-Key": job["id"]}, timeout=(10, c.backend_timeout), stream=True, allow_redirects=False) as response:
-            if response.status_code != 200:
-                response.raise_for_status()
-                raise InputError("The backend must return HTTP 200 with an .xlsx file.")
-            if response.headers.get("Content-Type", "").split(";")[0].strip().lower() != XLSX_TYPE:
-                raise InputError("The backend returned an unexpected content type.")
-            data = bounded_content(response, c.max_report_bytes)
-        validate_report(data)
-        return data

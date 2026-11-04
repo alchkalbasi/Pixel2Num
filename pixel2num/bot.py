@@ -6,17 +6,19 @@ from pathlib import Path
 
 import requests
 
-from .api import IMAGE_TYPES, Backend, InputError, Mattermost
+from .bot_toolbox import IMAGE_TYPES, InputError, Mattermost, summarize_report, validate_report
+from .bridge import Bridge
+from .ranges import parse_range
 
 LOG = logging.getLogger(__name__)
-HELP = "Send PNG, JPEG, WebP or TIFF images in this direct message, then type `process`. Commands: `status`, `clear` (pending images only), `retry` (latest failed job), `help`. Send commands as plain messages, without a slash."
+HELP = "Name each image file `START-END` (for example `81-100.jpg`: the counters of its first and last card), send the images in this direct message, then type `process`. PNG, JPEG, WebP, TIFF and BMP are supported. Captions are ignored. Commands: `status`, `clear` (pending images only), `retry` (latest failed job), `help`. Send commands as plain messages, without a slash."
 
 
 class Bot:
-    def __init__(self, config, mattermost=None, backend=None):
+    def __init__(self, config, mattermost=None, bridge=None):
         self.config = config
         self.mm = mattermost or Mattermost(config)
-        self.backend = backend or Backend(config)
+        self.bridge = bridge or Bridge(config)
         Path(config.data_dir).mkdir(parents=True, exist_ok=True)
         self.db = sqlite3.connect(Path(config.data_dir) / "state.sqlite3")
         self.db.row_factory = sqlite3.Row
@@ -76,7 +78,7 @@ class Bot:
         incoming = post.get("file_ids", [])
         if incoming:
             # Validate the whole message before changing the batch.
-            added = []
+            added, bad = [], []
             for fid in dict.fromkeys(incoming):
                 if any(f["id"] == fid for f in files):
                     continue
@@ -84,15 +86,26 @@ class Bot:
                 if info.get("post_id") != post["id"]:
                     raise InputError("An attachment does not belong to this message.")
                 if info.get("mime_type") not in IMAGE_TYPES:
-                    raise InputError("Only PNG, JPEG, WebP and TIFF images are supported. This message was not added.")
+                    raise InputError("Only PNG, JPEG, WebP, TIFF and BMP images are supported. This message was not added.")
                 if not 0 < info["size"] <= self.config.max_image_bytes:
                     raise InputError("An image exceeds the size limit. This message was not added.")
-                added.append({"id": fid, "name": Path(info["name"]).name, "mime": info["mime_type"], "size": info["size"]})
+                name = Path(info["name"]).name
+                entry = {"id": fid, "name": name, "mime": info["mime_type"], "size": info["size"]}
+                try:
+                    entry["start"], entry["count"] = parse_range(name, self.config.max_cards_per_image)
+                except ValueError as reason:
+                    bad.append(f"`{name}` ({reason})")
+                added.append(entry)
+            if bad:
+                raise InputError("Cannot use these files: " + "; ".join(bad) + ". Rename each file to START-END (for example `81-100.jpg`: the counters of its first and last card) and send it again. Nothing from this message was added.")
             combined = files + added
             if len(combined) > self.config.max_images or sum(f["size"] for f in combined) > self.config.max_batch_bytes:
                 raise InputError("Batch limit reached. Type `process` or `clear` before sending more images. This message was not added.")
             self.db.execute("INSERT OR REPLACE INTO batches VALUES (?,?,?)", (cid, uid, json.dumps(combined)))
-            self.say(cid, f"Collected {len(combined)} image(s). Type `process` when ready.")
+            ranges = [(f["start"], f["start"] + f["count"] - 1) for f in combined]
+            overlaps = sorted({f"{a[0]}-{a[1]}" for i, a in enumerate(ranges) for b in ranges[i + 1:] if a[0] <= b[1] and b[0] <= a[1]})
+            note = f" Warning: overlapping ranges ({', '.join(overlaps)}); duplicate codes will be marked `repeated`." if overlaps else ""
+            self.say(cid, f"Collected {len(combined)} image(s). Added: {', '.join(f'{f['start']}-{f['start'] + f['count'] - 1}' for f in added)}.{note} Type `process` when ready.")
             return
         command = post.get("message", "").strip().lower()
         if command == "clear":
@@ -104,7 +117,7 @@ class Bot:
                 return
             self.db.execute("INSERT INTO jobs(id,channel_id,user_id,files,state,created) VALUES (?,?,?,?, 'queued',?)", (post["id"], cid, uid, json.dumps(files), post["create_at"]))
             self.db.execute("DELETE FROM batches WHERE channel_id=? AND user_id=?", (cid, uid))
-            self.say(cid, f"Queued {len(files)} image(s). Job: `{post['id']}`.")
+            self.say(cid, f"Queued {len(files)} image(s). Job: `{post['id']}`. Processing can take a few minutes; I will reply when the report is ready.")
         elif command == "retry":
             job = self.db.execute("SELECT * FROM jobs WHERE channel_id=? AND user_id=? AND state='failed' ORDER BY created DESC LIMIT 1", (cid, uid)).fetchone()
             if job:
@@ -144,6 +157,12 @@ class Bot:
                     blocked_channels.add(post["channel_id"])
                     LOG.warning("Message %s deferred (%s)", row["id"], type(error).__name__)
 
+    def range_of(self, name):
+        try:
+            return parse_range(name, self.config.max_cards_per_image)
+        except ValueError:
+            raise InputError(f"`{name}` is not named START-END. Send it again with a valid name.") from None
+
     def work(self):
         job = self.db.execute("SELECT * FROM jobs WHERE state IN ('queued','ready','uploaded') ORDER BY created,id LIMIT 1").fetchone()
         if not job:
@@ -159,8 +178,10 @@ class Bot:
                     total += len(content)
                     if total > self.config.max_batch_bytes:
                         raise InputError("The batch exceeds the configured size limit.")
-                    images.append((file["name"], content, file["mime"]))
-                result = self.backend.convert(job, images)
+                    start, count = (file["start"], file["count"]) if "start" in file else self.range_of(file["name"])
+                    images.append((file["name"], content, file["mime"], start, count))
+                result = self.bridge.convert(job, images)
+                validate_report(result)
                 with self.db:
                     self.db.execute("UPDATE jobs SET state='ready',result=? WHERE id=?", (result, job["id"]))
                 state = "ready"
@@ -168,7 +189,7 @@ class Bot:
                 uploaded_id = self.mm.upload(job["channel_id"], job["id"], result)
                 with self.db:
                     self.db.execute("UPDATE jobs SET state='uploaded',uploaded_id=? WHERE id=?", (uploaded_id, job["id"]))
-            self.mm.post(job["channel_id"], f"Your Excel report is ready. Job: `{job['id']}`.", [uploaded_id])
+            self.mm.post(job["channel_id"], f"Your Excel report is ready. Job: `{job['id']}`. {summarize_report(result)}.", [uploaded_id])
             with self.db:
                 self.db.execute("UPDATE jobs SET state='done',result=NULL,files='[]' WHERE id=?", (job["id"],))
         except Exception as error:
