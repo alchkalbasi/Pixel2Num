@@ -6,6 +6,27 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PATH=/opt/venv/bin:$PATH \
     PADDLE_PDX_CACHE_HOME=/opt/paddlex \
     PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK=True
+ARG APT_MIRROR_URL=https://ftp.debian.org/debian/
+ARG APT_SECURITY_MIRROR_URL=https://security.debian.org/debian-security/
+
+# Debian's HTTPS servers by default; CI overrides both with the internal mirror.
+# The shell fallbacks cover CI passing an unset variable as an empty build arg.
+RUN APT_MIRROR_URL="${APT_MIRROR_URL:-https://ftp.debian.org/debian/}" && \
+    APT_SECURITY_MIRROR_URL="${APT_SECURITY_MIRROR_URL:-https://security.debian.org/debian-security/}" && \
+    . /etc/os-release && \
+    printf '%s\n' \
+        'Types: deb' \
+        "URIs: ${APT_MIRROR_URL}" \
+        "Suites: ${VERSION_CODENAME} ${VERSION_CODENAME}-updates" \
+        'Components: main contrib non-free non-free-firmware' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        '' \
+        'Types: deb' \
+        "URIs: ${APT_SECURITY_MIRROR_URL}" \
+        "Suites: ${VERSION_CODENAME}-security" \
+        'Components: main contrib non-free non-free-firmware' \
+        'Signed-By: /usr/share/keyrings/debian-archive-keyring.gpg' \
+        > /etc/apt/sources.list.d/debian.sources
 # System libraries needed by OpenCV / Paddle on a slim image.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libgomp1 \
