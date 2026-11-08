@@ -42,7 +42,7 @@ Commands are ordinary messages, not slash commands. PNG, JPEG, WebP, TIFF and BM
 
 ## The report
 
-One row per card: **Image | Counter | Charge Code | Status**. Rows follow the order the images were sent, and cards go top to bottom within an image. The code is stored as text. Status is `succeeded`, `failed` (code not read completely; the row stays so counters never shift) or `repeated` (the same code appears more than once in the batch; every copy is marked). The chat message gives only the counts, never the codes.
+One row per card: **Image | Counter | Charge Code | Status**. Rows are sorted by the Counter column, from the smallest to the biggest, whatever order the images were sent in. The code is stored as text. Status is `succeeded`, `failed` (code not read completely; the row stays so counters never shift) or `repeated` (the same code appears more than once in the batch; every copy is marked). The chat message gives only the counts, never the codes.
 
 The extraction rules (card types, code length detection, retries with more contrast) are described at the top of [extract_numbers.py](pixel2num/extract_numbers.py). The same file works as a command-line tool: `python -m pixel2num.extract_numbers <folder> results.xlsx [--debug] [--layout=left] [--len=15]`.
 

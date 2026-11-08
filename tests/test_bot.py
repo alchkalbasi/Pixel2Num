@@ -1,25 +1,29 @@
+"""L1 unit tests: bot logic with a fake Mattermost and a fake bridge."""
 import io
 import json
 import logging
+import os
 import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
-from unittest.mock import Mock
+from unittest.mock import Mock, patch
 
 import requests
 from openpyxl import Workbook
 
-from pixel2num.bot_toolbox import InputError, bounded_content, summarize_report, validate_report
 from pixel2num.bot import Bot
+from pixel2num.bot_toolbox import (
+    InputError, bounded_content, summarize_report, validate_report)
 from pixel2num.config import Config
 
-
 SECRET_CODE = "123456789012345"
-RANGES = {"a": "1-5", "b": "6-10", "c": "11-15", "d": "16-20"}  # file id -> valid START-END name
+# file id -> valid START-END name
+RANGES = {"a": "1-5", "b": "6-10", "c": "11-15", "d": "16-20"}
 
 
 def workbook():
+    """A small valid report with one succeeded, failed and repeated row."""
     wb = Workbook()
     ws = wb.active
     ws.append(["Image", "Counter", "Charge Code", "Status"])
@@ -32,6 +36,7 @@ def workbook():
 
 
 def fake_package():
+    """A zip with only the parts validate_report looks for."""
     stream = io.BytesIO()
     with zipfile.ZipFile(stream, "w") as archive:
         for name in ("[Content_Types].xml", "xl/workbook.xml", "_rels/.rels"):
@@ -40,8 +45,12 @@ def fake_package():
 
 
 class FakeMattermost:
+    """In-memory stand-in for the Mattermost client."""
+
     def __init__(self):
-        self.channels = [{"id": "dm", "type": "D"}, {"id": "other", "type": "D"}, {"id": "public", "type": "O"}]
+        self.channels = [{"id": "dm", "type": "D"},
+                         {"id": "other", "type": "D"},
+                         {"id": "public", "type": "O"}]
         self.posts = []
         self.info = {}
         self.sent = []
@@ -55,13 +64,17 @@ class FakeMattermost:
             return self.channels
         if path.startswith("/files/"):
             return self.info[path.split("/")[2]]
+        # Channel posts, newest first, paged with "before" like the real API.
         cid = path.split("/")[2]
-        posts = sorted([p for p in self.posts if p["channel_id"] == cid], key=lambda p: (p["create_at"], p["id"]), reverse=True)
+        posts = sorted([p for p in self.posts if p["channel_id"] == cid],
+                       key=lambda p: (p["create_at"], p["id"]), reverse=True)
         if params.get("before"):
-            index = next(i for i, p in enumerate(posts) if p["id"] == params["before"])
+            index = next(i for i, p in enumerate(posts)
+                         if p["id"] == params["before"])
             posts = posts[index + 1:]
         posts = posts[:params["per_page"]]
-        return {"order": [p["id"] for p in posts], "posts": {p["id"]: p for p in posts}}
+        return {"order": [p["id"] for p in posts],
+                "posts": {p["id"]: p for p in posts}}
 
     def download(self, file_id, limit):
         return b"image"
@@ -79,7 +92,8 @@ class FakeMattermost:
 class BotTests(unittest.TestCase):
     def setUp(self):
         self.temp = tempfile.TemporaryDirectory()
-        self.config = Config("https://chat.test", "mm-secret", data_dir=self.temp.name)
+        self.config = Config(
+            "https://chat.test", "mm-secret", data_dir=self.temp.name)
         self.mm = FakeMattermost()
         self.bridge = Mock()
         self.bridge.convert.return_value = workbook()
@@ -91,11 +105,18 @@ class BotTests(unittest.TestCase):
         self.temp.cleanup()
 
     def add(self, text="", files=(), cid="dm", uid="user"):
+        """Add a post to the fake server. Files in RANGES get a valid
+        START-END name; other file IDs are used as the file name."""
         self.counter += 1
-        post = {"id": f"post-{self.counter:04}", "channel_id": cid, "user_id": uid, "message": text, "file_ids": list(files), "create_at": self.bot.started + self.counter, "type": ""}
+        post = {"id": f"post-{self.counter:04}", "channel_id": cid,
+                "user_id": uid, "message": text, "file_ids": list(files),
+                "create_at": self.bot.started + self.counter, "type": ""}
         self.mm.posts.append(post)
         for fid in files:
-            self.mm.info[fid] = {"post_id": post["id"], "mime_type": "image/png", "size": 5, "name": RANGES.get(fid, fid + ".png")+".png" if fid in RANGES else fid + ".png"}
+            name = RANGES[fid] + ".png" if fid in RANGES else fid + ".png"
+            self.mm.info[fid] = {"post_id": post["id"],
+                                 "mime_type": "image/png", "size": 5,
+                                 "name": name}
         return post
 
     def test_batch_multiple_messages_delivery_and_deduplication(self):
@@ -107,7 +128,8 @@ class BotTests(unittest.TestCase):
         self.bridge.convert.assert_called_once()
         job, images = self.bridge.convert.call_args.args
         self.assertEqual(job["id"], process["id"])
-        self.assertEqual([i[0] for i in images], ["1-5.png", "6-10.png", "11-15.png"])
+        self.assertEqual([i[0] for i in images],
+                         ["1-5.png", "6-10.png", "11-15.png"])
         self.assertEqual(len(self.mm.uploads), 1)
         self.assertEqual(self.mm.sent[-1][0], "dm")
         self.assertEqual(self.mm.sent[-1][2], ["uploaded-file"])
@@ -123,7 +145,8 @@ class BotTests(unittest.TestCase):
         self.add("process", cid="other", uid="second-user")
         self.bot.run_once()
         self.assertEqual(self.mm.uploads[0][0], "other")
-        self.assertEqual(self.bridge.convert.call_args.args[1][0][0], "6-10.png")
+        self.assertEqual(
+            self.bridge.convert.call_args.args[1][0][0], "6-10.png")
         rows = self.bot.db.execute("SELECT * FROM batches").fetchall()
         self.assertEqual(len(rows), 1)
         self.assertEqual(json.loads(rows[0]["files"])[0]["id"], "a")
@@ -132,7 +155,9 @@ class BotTests(unittest.TestCase):
         self.add(files=["a", "bad"])
         self.mm.info["bad"]["mime_type"] = "application/pdf"
         self.bot.run_once()
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 0)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM batches").fetchone()[0],
+            0)
         self.bot.config = replace(self.config, max_images=1)
         self.add(files=["b", "c"])
         self.bot.run_once()
@@ -143,12 +168,17 @@ class BotTests(unittest.TestCase):
         self.add(files=["a"])
         process = self.add("process")
         self.bot.run_once()
-        self.assertEqual(self.bot.db.execute("SELECT state FROM jobs").fetchone()[0], "failed")
+        self.assertEqual(
+            self.bot.db.execute("SELECT state FROM jobs").fetchone()[0],
+            "failed")
         self.bridge.convert.side_effect = None
         self.add("retry")
         self.bot.run_once()
-        self.assertEqual(self.bridge.convert.call_args.args[0]["id"], process["id"])
-        self.assertEqual(self.bot.db.execute("SELECT state FROM jobs").fetchone()[0], "done")
+        self.assertEqual(
+            self.bridge.convert.call_args.args[0]["id"], process["id"])
+        self.assertEqual(
+            self.bot.db.execute("SELECT state FROM jobs").fetchone()[0],
+            "done")
 
     def test_delivery_retry_reuses_uploaded_workbook(self):
         self.add(files=["a"])
@@ -183,11 +213,16 @@ class BotTests(unittest.TestCase):
         self.bot.poll()
         self.bot.consume()
         self.bot.poll()
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0], 205)
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0], 205)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM inbox").fetchone()[0],
+            205)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM outbox").fetchone()[0],
+            205)
 
     def test_allowlist_and_clear(self):
-        self.bot.config = replace(self.config, allowed_user_ids=frozenset(["user"]))
+        self.bot.config = replace(
+            self.config, allowed_user_ids=frozenset(["user"]))
         self.add(files=["a"], uid="blocked")
         self.add(files=["b"])
         self.add("clear")
@@ -212,7 +247,10 @@ class BotTests(unittest.TestCase):
         self.bot.run_once()
         self.assertIn("unavailable", self.mm.sent[0][1])
         self.assertIn("START-END", self.mm.sent[1][1])
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM inbox WHERE done=0").fetchone()[0], 0)
+        self.assertEqual(
+            self.bot.db.execute(
+                "SELECT COUNT(*) FROM inbox WHERE done=0").fetchone()[0],
+            0)
 
     def test_invalid_filename_rejects_whole_message(self):
         self.add(files=["a"])
@@ -224,7 +262,8 @@ class BotTests(unittest.TestCase):
         self.assertIn("Nothing from this message was added", reply)
         batch = self.bot.db.execute("SELECT files FROM batches").fetchone()[0]
         self.assertEqual([f["id"] for f in json.loads(batch)], ["a"])
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
 
     def test_all_invalid_files_listed_and_bounds(self):
         self.add(files=["IMG_1", "9-3", "1-1000"])
@@ -232,29 +271,35 @@ class BotTests(unittest.TestCase):
         reply = self.mm.sent[-1][1]
         for name in ("IMG_1.png", "9-3.png", "1-1000.png"):
             self.assertIn(name, reply)
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM batches").fetchone()[0], 0)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM batches").fetchone()[0],
+            0)
 
     def test_caption_never_supplies_range_or_command(self):
         self.add("81-100", files=["IMG_9"])
         self.add("process", files=["a"])
         self.bot.run_once()
         self.assertIn("Cannot use", self.mm.sent[0][1])
-        self.assertEqual(self.bot.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
+        self.assertEqual(
+            self.bot.db.execute("SELECT COUNT(*) FROM jobs").fetchone()[0], 0)
         self.bridge.convert.assert_not_called()
 
     def test_range_stored_and_listed_in_reply(self):
         self.add(files=["a", "b"])
         self.bot.run_once()
         self.assertIn("Added: 1-5, 6-10.", self.mm.sent[0][1])
-        files = json.loads(self.bot.db.execute("SELECT files FROM batches").fetchone()[0])
-        self.assertEqual([(f["start"], f["count"]) for f in files], [(1, 5), (6, 5)])
+        files = json.loads(
+            self.bot.db.execute("SELECT files FROM batches").fetchone()[0])
+        self.assertEqual(
+            [(f["start"], f["count"]) for f in files], [(1, 5), (6, 5)])
 
     def test_overlapping_ranges_warn_but_are_allowed(self):
         self.add(files=["a"])
         self.add(files=["5-9"])
         self.bot.run_once()
         self.assertIn("overlapping", self.mm.sent[-1][1])
-        self.assertEqual(len(json.loads(self.bot.db.execute("SELECT files FROM batches").fetchone()[0])), 2)
+        batch = self.bot.db.execute("SELECT files FROM batches").fetchone()[0]
+        self.assertEqual(len(json.loads(batch)), 2)
 
     def test_bmp_accepted_and_default_limit(self):
         self.assertEqual(self.config.max_images, 50)
@@ -273,7 +318,8 @@ class BotTests(unittest.TestCase):
         self.assertEqual([(i[3], i[4]) for i in images], [(1, 5), (6, 5)])
         ready = self.mm.sent[-1][1]
         self.assertIn("1 succeeded, 1 failed, 1 repeated", ready)
-        everything = ready + "".join(logs.output) + "".join(m for _, m, _ in self.mm.sent)
+        everything = (ready + "".join(logs.output)
+                      + "".join(m for _, m, _ in self.mm.sent))
         self.assertNotIn(SECRET_CODE, everything)
 
     def test_invalid_report_from_bridge_fails_job(self):
@@ -281,7 +327,9 @@ class BotTests(unittest.TestCase):
         self.add(files=["a"])
         self.add("process")
         self.bot.run_once()
-        self.assertEqual(self.bot.db.execute("SELECT state FROM jobs").fetchone()[0], "failed")
+        self.assertEqual(
+            self.bot.db.execute("SELECT state FROM jobs").fetchone()[0],
+            "failed")
 
     def test_old_job_without_range_uses_file_name(self):
         self.add(files=["a"])
@@ -289,25 +337,34 @@ class BotTests(unittest.TestCase):
         self.bot.poll()
         self.bot.consume()
         with self.bot.db:
-            files = json.loads(self.bot.db.execute("SELECT files FROM jobs").fetchone()[0])
+            files = json.loads(
+                self.bot.db.execute("SELECT files FROM jobs").fetchone()[0])
             for f in files:
                 del f["start"], f["count"]
-            self.bot.db.execute("UPDATE jobs SET files=?", (json.dumps(files),))
+            self.bot.db.execute(
+                "UPDATE jobs SET files=?", (json.dumps(files),))
         self.bot.work()
-        self.assertEqual([(i[3], i[4]) for i in self.bridge.convert.call_args.args[1]], [(1, 5)])
+        images = self.bridge.convert.call_args.args[1]
+        self.assertEqual([(i[3], i[4]) for i in images], [(1, 5)])
 
 
 class ConfigTests(unittest.TestCase):
     def test_env_without_backend_settings(self):
-        import os
-        from unittest.mock import patch
-        env = {"MATTERMOST_URL": "https://chat.test", "MATTERMOST_TOKEN": "t", "BACKEND_URL": "http://old", "LAYOUT": "Left", "CODE_LEN": "15"}
+        env = {"MATTERMOST_URL": "https://chat.test",
+               "MATTERMOST_TOKEN": "t", "BACKEND_URL": "http://old",
+               "LAYOUT": "Left", "CODE_LEN": "15"}
         with patch.dict(os.environ, env, clear=True):
             config = Config.from_env()
-        self.assertEqual((config.layout, config.code_len, config.max_cards_per_image), ("left", 15, 40))
-        with patch.dict(os.environ, {**env, "LAYOUT": "top"}, clear=True), self.assertRaises(ValueError):
+        self.assertEqual(
+            (config.layout, config.code_len, config.max_cards_per_image),
+            ("left", 15, 40))
+        # An invalid layout fails at startup.
+        with patch.dict(os.environ, {**env, "LAYOUT": "top"}, clear=True), \
+                self.assertRaises(ValueError):
             Config.from_env()
-        with patch.dict(os.environ, {k: v for k, v in env.items() if k != "BACKEND_URL"}, clear=True):
+        # The old BACKEND_URL setting is not required (or ignored).
+        without_backend = {k: v for k, v in env.items() if k != "BACKEND_URL"}
+        with patch.dict(os.environ, without_backend, clear=True):
             Config.from_env()
 
 

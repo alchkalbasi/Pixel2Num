@@ -158,7 +158,7 @@ Sign-off: name, date, and image tag go here.
 | R-LIB-1 | L0 import check |
 | R-LIB-2…5 | L1 (library unit tests), L0 print grep |
 | R-LIB-6, R-LIB-7 | L2 parity (library + CLI), L3 parity in image |
-| R-JOB-1…8 | L1; L4 |
+| R-JOB-1…8 | L1; L4 (R-JOB-2 counter sort: `test_records_are_sorted_by_counter` in the L2 file) |
 | R-OCR-1 | L1 (startup order with fake) + L4 log check |
 | R-OCR-2, R-OCR-3 | L3 |
 | R-CFG-1…3 | L1 config test |

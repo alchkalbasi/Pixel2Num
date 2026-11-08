@@ -1,12 +1,19 @@
-"""File-name ranges: START-END.jpg gives the counters of the first and last card (SPEC R-RANGE)."""
+"""File-name ranges (SPEC R-RANGE).
+
+START-END.jpg gives the counters of the first and last card.
+"""
 import re
 from pathlib import Path
 
-NAME_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")  # START-END (file name without extension)
+# START-END (file name without extension), spaces around the numbers allowed.
+NAME_RE = re.compile(r"^\s*(\d+)\s*-\s*(\d+)\s*$")
 
 
 def parse_range(filename, max_cards):
-    """Return (start, count) for a name like '81-100.jpg', or raise ValueError with a short reason."""
+    """Return (start, count) for a name like '81-100.jpg'.
+
+    Raises ValueError with a short reason when the name is not usable.
+    """
     match = NAME_RE.match(Path(filename).stem)
     if not match:
         raise ValueError("the name is not START-END")
