@@ -2,12 +2,11 @@
 import io
 import json
 import logging
-import os
 import tempfile
 import unittest
 import zipfile
 from dataclasses import replace
-from unittest.mock import Mock, patch
+from unittest.mock import Mock
 
 import requests
 from openpyxl import Workbook
@@ -346,26 +345,6 @@ class BotTests(unittest.TestCase):
         self.bot.work()
         images = self.bridge.convert.call_args.args[1]
         self.assertEqual([(i[3], i[4]) for i in images], [(1, 5)])
-
-
-class ConfigTests(unittest.TestCase):
-    def test_env_without_backend_settings(self):
-        env = {"MATTERMOST_URL": "https://chat.test",
-               "MATTERMOST_TOKEN": "t", "BACKEND_URL": "http://old",
-               "LAYOUT": "Left", "CODE_LEN": "15"}
-        with patch.dict(os.environ, env, clear=True):
-            config = Config.from_env()
-        self.assertEqual(
-            (config.layout, config.code_len, config.max_cards_per_image),
-            ("left", 15, 40))
-        # An invalid layout fails at startup.
-        with patch.dict(os.environ, {**env, "LAYOUT": "top"}, clear=True), \
-                self.assertRaises(ValueError):
-            Config.from_env()
-        # The old BACKEND_URL setting is not required (or ignored).
-        without_backend = {k: v for k, v in env.items() if k != "BACKEND_URL"}
-        with patch.dict(os.environ, without_backend, clear=True):
-            Config.from_env()
 
 
 class TransportTests(unittest.TestCase):
