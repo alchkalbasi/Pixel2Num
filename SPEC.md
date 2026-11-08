@@ -78,7 +78,7 @@ Operators DM the bot their card photos, type `process`, and get the extractor's 
 ### 4.4 Job processing in the bot — `R-JOB`
 
 - **R-JOB-1 (in-process call).** The bot's `Backend` HTTP client is replaced by a local `Bridge` object (`pixel2num/bridge.py`) with the same shape: `convert(job, images) -> bytes`. The job state machine in `Bot.work()` (`queued → processing → ready → uploaded → done/failed`) stays as it is.
-- **R-JOB-2 (order).** Images are passed to the extractor **in batch order** (the order the messages were received, then attachment order within a message). The report rows follow that order, with cards top to bottom within each image.
+- **R-JOB-2 (order).** Images are passed to the extractor in batch order (the order the messages were received, then attachment order within a message). The report rows are then **sorted by the Counter column, from smallest to biggest**. Rows with the same counter (overlapping ranges) keep batch order. A row without a counter (bad file name, CLI only) goes last. The sort happens after reading, so extraction results do not change. *(Changed after SPEC 001 rollout: previously rows followed batch order.)*
 - **R-JOB-3 (temp files).** Each job writes its images to its own temp directory under `/tmp` (tmpfs in Compose), named `NNN.<ext>` by position. Original filenames are never used as paths, so duplicate names can't overwrite each other. The **Image** column in the report shows the original filename (for example `81-100.jpg`). The directory is deleted when the job finishes, whether it succeeds or fails.
 - **R-JOB-4 (no debug output).** Debug drawing is always off in bot mode.
 - **R-JOB-5 (cross-image duplicates).** `mark_repeated` runs over the whole job, as the CLI does, so a code repeated anywhere in the batch is marked `repeated`.
@@ -150,7 +150,7 @@ SPEC 001 is done when every requirement ID is covered in the HARNESS traceabilit
 ## 9. Decisions on the former open questions
 
 1. **Overlapping ranges:** allowed, with a warning (R-RANGE-8).
-2. **Row order:** the order the images were sent (R-JOB-2).
+2. **Row order:** sorted by Counter, smallest first (R-JOB-2; originally the order the images were sent).
 3. **Parity photos:** the three sample photos (one per card type) live in git-ignored `tests/fixtures/cards/`. They are renamed `1-20`, `21-40`, `41-51` for the test only. Add a harder case when one is available.
 
 ## 10. Implementation notes

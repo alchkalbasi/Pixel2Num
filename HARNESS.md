@@ -75,7 +75,6 @@ Required new cases (names are suggestions):
 | `test_ready_message_has_counts_not_codes` | R-JOB-6, R-SEC-1 |
 | `test_bridge_exception_fails_job_then_retry_reruns` | R-JOB-7 |
 | `test_invalid_workbook_from_bridge_rejected` | R-JOB-8 |
-| `test_config_backend_vars_not_required_and_new_vars_validated` | R-CFG-1, R-CFG-2 |
 | `test_no_codes_in_logs` (run a job with `assertLogs` and check that no fake code string appears) | R-SEC-1, R-LIB-5 |
 
 ## L2 — Extractor parity on real photos
@@ -158,10 +157,10 @@ Sign-off: name, date, and image tag go here.
 | R-LIB-1 | L0 import check |
 | R-LIB-2…5 | L1 (library unit tests), L0 print grep |
 | R-LIB-6, R-LIB-7 | L2 parity (library + CLI), L3 parity in image |
-| R-JOB-1…8 | L1; L4 |
+| R-JOB-1…8 | L1; L4 (R-JOB-2 counter sort: `test_records_are_sorted_by_counter` in the L2 file) |
 | R-OCR-1 | L1 (startup order with fake) + L4 log check |
 | R-OCR-2, R-OCR-3 | L3 |
-| R-CFG-1…3 | L1 config test |
+| R-CFG-1…3 | Review (no automated test; the config test was removed on purpose) |
 | R-SEC-1 | L1 log test; L4 log check |
 | R-SEC-2 | L1 temp-dir test |
 | R-SEC-3 | `.gitignore` entry + review |

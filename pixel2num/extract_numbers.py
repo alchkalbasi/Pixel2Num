@@ -10,48 +10,61 @@ IMAGE NAMES:  START-END.jpg      example: 81-100.jpg
   - So the program needs no Persian-number reading at all.
 
 CARD TYPES (found automatically for every image, nothing to set):
-  right   teal cards,  code in a box on the right side      (5-5-5 digits)
-  left    blue cards,  code on the left of the card          (4-4-4-2 digits)
-  middle  grey cards,  code in the middle of the card        (3-4-4-4 digits)
-  Different card types can be mixed in one folder.  New types: add a line to LAYOUTS.
+  right   teal cards,  code in a box on the right side    (5-5-5 digits)
+  left    blue cards,  code on the left of the card        (4-4-4-2 digits)
+  middle  grey cards,  code in the middle of the card      (3-4-4-4 digits)
+  Different card types can be mixed in one folder.
+  New types: add a line to LAYOUTS.
 
 CODE LENGTH:
-  The length is NOT fixed to 15.  For every image the program finds the length
-  that most of its codes have (15, 14, 16 ... ) and a code is "succeeded" only if
-  it has exactly that length, so a code with a missing digit is marked failed.
+  The length is NOT fixed to 15.  For every image the program finds the
+  length that most of its codes have (15, 14, 16 ... ) and a code is
+  "succeeded" only if it has exactly that length, so a code with a missing
+  digit is marked failed.
 
 BACKGROUND:
-  Nothing depends on the card colour.  If an image is not read completely, the program
-  automatically tries it again with more contrast and with inverted colours
-  (for dark cards) and keeps the best result.
+  Nothing depends on the card colour.  If an image is not read completely,
+  the program automatically tries it again with more contrast and with
+  inverted colours (for dark cards) and keeps the best result.
 
 Usage:
     pip install -r requirements.txt
     python -m pixel2num.extract_numbers images_folder results.xlsx
-    python -m pixel2num.extract_numbers images_folder results.xlsx --debug        # also saves *_debug.jpg
-    python -m pixel2num.extract_numbers images_folder results.xlsx --layout=left  # force one card type
-    python -m pixel2num.extract_numbers images_folder results.xlsx --len=15       # force the code length
+    python -m pixel2num.extract_numbers images_folder results.xlsx --debug
+        (also saves *_debug.jpg)
+    python -m pixel2num.extract_numbers images_folder out.xlsx --layout=left
+        (force one card type)
+    python -m pixel2num.extract_numbers images_folder results.xlsx --len=15
+        (force the code length)
 
-Library use (the Mattermost bot): importing this module does NOT load PaddleOCR.
-The engine is created on the first call to get_ocr() (or explicitly with load_ocr()).
-Call build_records() with Entry items, mark_repeated(), then workbook_bytes().
-Messages go through the "pixel2num.extract" logger and never contain charge codes.
+Library use (the Mattermost bot): importing this module does NOT load
+PaddleOCR. The engine is created on the first call to get_ocr() (or
+explicitly with load_ocr()).
+Call build_records() with Entry items, mark_repeated(), then
+workbook_bytes().
+Messages go through the "pixel2num.extract" logger and never contain charge
+codes.
 
 Excel columns:  Image | Counter | Charge Code | Status
   - Image        = image file name
   - Counter      = START..END taken from the file name
-  - Charge Code  = the digits, no spaces, stored as TEXT so leading zeros are kept
+  - Charge Code  = the digits, no spaces, stored as TEXT so leading zeros
+                   are kept
   - Status       = succeeded  -> a full code was read
-                   failed     -> the code could not be read (cell is empty, or holds
-                                 the partial digits that were seen)
-                   repeated   -> the same code appears more than once in ALL images
-                                 (every copy is marked, so you can check both photos)
+                   failed     -> the code could not be read (cell is empty,
+                                 or holds the partial digits that were seen)
+                   repeated   -> the same code appears more than once in ALL
+                                 images (every copy is marked, so you can
+                                 check both photos)
+  - Rows are sorted by the Counter column, from the smallest to the biggest
+    (rows with the same counter keep the order the images were given).
   - A card that could not be read stays in its own row (status failed), so the
-    order and the counters of the other cards never shift.
-  - Cards that overlap with UNEVEN spacing (grey cards) are numbered one after the other.
-    If the number of codes found is different from the number in the file name, the
-    counters cannot be trusted, so every row of that image is marked failed
-    (the codes stay in the sheet so you can check them by hand).
+    counters of the other cards never shift.
+  - Cards that overlap with UNEVEN spacing (grey cards) are numbered one after
+    the other. If the number of codes found is different from the number in
+    the file name, the counters cannot be trusted, so every row of that image
+    is marked failed (the codes stay in the sheet so you can check them by
+    hand).
 """
 import io
 import logging
@@ -72,41 +85,57 @@ from .ranges import NAME_RE
 LOG = logging.getLogger("pixel2num.extract")
 
 # ----------------------------- CONFIG ---------------------------------
-CODE_LEN = None  # default: None = find the code length of every image by itself. Or force e.g. 15
-RIGHT_SIDE_FROM = 0.50  # teal cards: only look at text right of 50% of the image width
-LAYOUT = "auto"  # default: "auto" = try every layout below and keep the best one, or one name
-LAYOUTS = {  # where the code sits: (from, to) as a fraction of the image width
+# Default: None = find the code length of every image by itself.
+# Or force a length, e.g. 15.
+CODE_LEN = None
+# Teal cards: only look at text right of 50% of the image width.
+RIGHT_SIDE_FROM = 0.50
+# Default: "auto" = try every layout below and keep the best one,
+# or give one layout name.
+LAYOUT = "auto"
+# Where the code sits: (from, to) as a fraction of the image width.
+LAYOUTS = {
     "right": (RIGHT_SIDE_FROM, 1.00),
     "left": (0.27, 0.60),
     "middle": (0.36, 0.72),
 }
-COLUMN_TOL = 0.10  # codes of one image start at the same x (+- 10% of the width)
+COLUMN_TOL = 0.10  # codes of one image start at the same x (+- 10% of width)
 UPSCALE = 2.0  # small text reads better when enlarged
 MIN_GROUP_DIGITS = 4  # ignore text pieces with fewer digits (like "333")
-MIN_SHORT_DIGITS = 2  # 2-3 digit pieces are only used when they touch a code line (like "088")
-MIN_PARTIAL_DIGITS = 8  # a line with fewer digits than this is noise, not a card
-LINE_GAP = 1.5  # two pieces further apart than 1.5 x text height are different texts
+# 2-3 digit pieces are only used when they touch a code line (like "088").
+MIN_SHORT_DIGITS = 2
+# A line with fewer digits than this is noise, not a card.
+MIN_PARTIAL_DIGITS = 8
+# Two pieces further apart than 1.5 x text height are different texts.
+LINE_GAP = 1.5
 SUCCESS, FAILED, REPEATED = "succeeded", "failed", "repeated"
 IMAGE_EXTS = {".png", ".jpg", ".jpeg", ".bmp", ".webp", ".tif", ".tiff"}
 # ----------------------------------------------------------------------
 
+
 class Entry(NamedTuple):
-    """One image to read. start/count come from the caller (the CLI parses the file name).
-    start=None means "no valid range": the image gets one failed row."""
+    """One image to read.
+
+    start/count come from the caller (the CLI parses the file name).
+    start=None means "no valid range": the image gets one failed row.
+    """
     name: str  # shown in the Image column
     path: Path
     start: Optional[int]
     count: int = 0
 
 
-_ocr = None
+_ocr = None  # the one PaddleOCR engine of this process (see get_ocr)
 
 
 def get_ocr():
-    """Create the PaddleOCR engine on first use and keep it for the whole process."""
+    """Create the PaddleOCR engine on first use and keep it for the whole
+    process."""
     global _ocr
     if _ocr is None:
-        from paddleocr import PaddleOCR  # imported here so that importing this module stays light
+        # Imported here (not at the top) so that importing this module stays
+        # light and does not load PaddleOCR (SPEC R-LIB-1).
+        from paddleocr import PaddleOCR
         try:  # PaddleOCR 3.x
             _ocr = PaddleOCR(
                 lang="en",
@@ -126,17 +155,23 @@ def load_ocr():
 
 
 def run_ocr(img):
-    """Return [(text, score, (x1, y1, x2, y2)), ...] for PaddleOCR 2.x and 3.x."""
+    """Return [(text, score, (x1, y1, x2, y2)), ...] for PaddleOCR 2.x
+    and 3.x."""
     ocr = get_ocr()
     items = []
     try:
+        # PaddleOCR 3.x result format.
         for page in ocr.predict(img):
-            for t, s, p in zip(page["rec_texts"], page["rec_scores"], page["rec_polys"]):
+            zipped = zip(page["rec_texts"], page["rec_scores"],
+                         page["rec_polys"])
+            for t, s, p in zipped:
                 xs, ys = [pt[0] for pt in p], [pt[1] for pt in p]
-                items.append((t, float(s), (min(xs), min(ys), max(xs), max(ys))))
+                items.append(
+                    (t, float(s), (min(xs), min(ys), max(xs), max(ys))))
         return items
     except (AttributeError, TypeError, KeyError):
         pass
+    # PaddleOCR 2.x result format.
     for page in ocr.ocr(img) or []:
         for box, (t, s) in page or []:
             xs, ys = [pt[0] for pt in box], [pt[1] for pt in box]
@@ -145,13 +180,17 @@ def run_ocr(img):
 
 
 def digits_only(text):
+    """Keep only the digits of a text, after fixing common OCR slips."""
     # common OCR slips inside number boxes
-    table = str.maketrans({"O": "0", "o": "0", "I": "1", "l": "1", "|": "1", "S": "5", "B": "8"})
+    table = str.maketrans(
+        {"O": "0", "o": "0", "I": "1", "l": "1", "|": "1", "S": "5",
+         "B": "8"})
     return re.sub(r"\D", "", text.translate(table))
 
 
 def pick_code(tokens, code_len):
-    """If a line has too many digits, find the pieces that add up to exactly code_len."""
+    """If a line has too many digits, find the pieces that add up to exactly
+    code_len."""
     for n in range(len(tokens), 0, -1):
         for combo in combinations(tokens, n):
             if sum(len(t) for t in combo) == code_len:
@@ -160,8 +199,9 @@ def pick_code(tokens, code_len):
 
 
 def find_rows(items, width, x_from=RIGHT_SIDE_FROM, x_to=1.0):
-    """Join the digit pieces that sit on the same line into one candidate code.
-    Only text between x_from and x_to (fraction of the width) is used."""
+    """Join the digit pieces that sit on the same line into one candidate
+    code. Only text between x_from and x_to (fraction of the width) is
+    used."""
     cands, shorts = [], []
     for text, score, (x1, y1, x2, y2) in items:
         if not x_from * width <= (x1 + x2) / 2 <= x_to * width:
@@ -170,9 +210,10 @@ def find_rows(items, width, x_from=RIGHT_SIDE_FROM, x_to=1.0):
         letters = len(re.findall(r"[A-Za-z]", text))
         if letters > 2:
             continue
-        groups = len([w for w in text.split() if digits_only(w)])  # "9838 5376" = 2 groups
-        piece = {"d": d, "x": x1, "cy": (y1 + y2) / 2, "h": y2 - y1, "g": groups,
-                 "box": (x1, y1, x2, y2)}
+        # "9838 5376" = 2 groups
+        groups = len([w for w in text.split() if digits_only(w)])
+        piece = {"d": d, "x": x1, "cy": (y1 + y2) / 2, "h": y2 - y1,
+                 "g": groups, "box": (x1, y1, x2, y2)}
         if len(d) >= MIN_GROUP_DIGITS:
             cands.append(piece)
         elif len(d) >= MIN_SHORT_DIGITS:
@@ -180,6 +221,7 @@ def find_rows(items, width, x_from=RIGHT_SIDE_FROM, x_to=1.0):
     if not cands:
         return []
 
+    # Group the pieces into text lines using their vertical centre.
     cands.sort(key=lambda c: c["cy"])
     tol = float(np.median([c["h"] for c in cands])) * 0.6
     lines, cur = [], [cands[0]]
@@ -191,18 +233,22 @@ def find_rows(items, width, x_from=RIGHT_SIDE_FROM, x_to=1.0):
             cur = [c]
     lines.append(cur)
 
-    # a short piece ("088", "71") that touches the end of a code line belongs to it
+    # a short piece ("088", "71") that touches the end of a code line
+    # belongs to it
     for s in sorted(shorts, key=lambda c: c["x"]):
         for line in lines:
             lh = float(np.median([c["h"] for c in line]))
             lx1 = min(c["box"][0] for c in line)
             lx2 = max(c["box"][2] for c in line)
             gap = max(s["box"][0] - lx2, lx1 - s["box"][2])
-            if abs(s["cy"] - np.mean([c["cy"] for c in line])) <= 0.5 * lh and gap <= 1.5 * lh:
+            same_line = (abs(s["cy"] - np.mean([c["cy"] for c in line]))
+                         <= 0.5 * lh)
+            if same_line and gap <= 1.5 * lh:
                 line.append(s)
                 break
 
-    segments = []  # the groups of ONE code are close together; a far piece is another text
+    # the groups of ONE code are close together; a far piece is another text
+    segments = []
     for line in lines:
         line.sort(key=lambda c: c["x"])
         lh = float(np.median([c["h"] for c in line]))
@@ -221,22 +267,32 @@ def find_rows(items, width, x_from=RIGHT_SIDE_FROM, x_to=1.0):
         y1 = min(c["box"][1] for c in line)
         x2 = max(c["box"][2] for c in line)
         y2 = max(c["box"][3] for c in line)
-        rows.append({"digits": "".join(tokens), "tokens": tokens,
-                     "groups": sum(c["g"] for c in line),  # a code is printed in groups
-                     "y": (y1 + y2) / 2, "box": (x1, y1, x2, y2)})
+        rows.append({
+            "digits": "".join(tokens),
+            "tokens": tokens,
+            # a code is printed in groups
+            "groups": sum(c["g"] for c in line),
+            "y": (y1 + y2) / 2,
+            "box": (x1, y1, x2, y2),
+        })
     return rows
 
 
 def pick_column(rows, width, force_len=None):
-    """Several columns of digits can be in the window (code, serial number ...).
-    The code column is the one with the most lines (every card has a code); a code is
-    printed in groups of digits, a barcode serial number is one block, so groups count first.
-    Returns (rows of that column, code length)."""
+    """Pick the column of digits that holds the codes.
+
+    Several columns of digits can be in the window (code, serial number ...).
+    The code column is the one with the most lines (every card has a code);
+    a code is printed in groups of digits, a barcode serial number is one
+    block, so groups count first.
+    Returns (rows of that column, code length).
+    """
     long_rows = [r for r in rows if len(r["digits"]) >= MIN_PARTIAL_DIGITS]
     if not long_rows:
         return [], force_len or 0
     tol = COLUMN_TOL * width
 
+    # Cluster the lines by their left edge (x).
     clusters = []
     for r in sorted(long_rows, key=lambda r: r["box"][0]):
         if clusters and r["box"][0] - clusters[-1][0]["box"][0] <= tol:
@@ -244,13 +300,15 @@ def pick_column(rows, width, force_len=None):
         else:
             clusters.append([r])
 
-    def common_len(rs):  # (most common length, how many lines have it)
+    def common_len(rs):
+        """(most common length, how many lines have it)"""
         c = Counter(len(r["digits"]) for r in rs)
         length, n = max(c.items(), key=lambda kv: (kv[1], kv[0]))
         return length, n
 
-    best = max(clusters, key=lambda cl: (sum(r["groups"] >= 2 for r in cl), len(cl),
-                                         common_len(cl)[1]))
+    best = max(clusters,
+               key=lambda cl: (sum(r["groups"] >= 2 for r in cl), len(cl),
+                               common_len(cl)[1]))
     code_len = force_len or common_len(best)[0]
     same = [r for r in best if len(r["digits"]) == code_len] or best
     anchor = float(np.median([r["box"][0] for r in same]))
@@ -258,8 +316,11 @@ def pick_column(rows, width, force_len=None):
 
 
 def spacing_is_regular(diffs, step):
-    """True when the cards are spaced evenly (a missed card = a gap of 2, 3 ... steps).
-    False for overlapped cards that show strips of different height."""
+    """True when the cards are spaced evenly.
+
+    (A missed card = a gap of 2, 3 ... steps.)
+    False for overlapped cards that show strips of different height.
+    """
     if not diffs or not step:
         return True
     bad = 0
@@ -271,21 +332,29 @@ def spacing_is_regular(diffs, step):
 
 
 def assign_slots(rows, max_slots, code_len):
-    """Give every code a position 1..max_slots (top = 1) using its vertical place.
-    A card that was not read leaves a gap (it is NOT skipped), so numbering never shifts.
-    Returns ({position: row}, [rows that did not fit anywhere], positions_are_reliable)."""
-    extras = [r for r in rows if len(r["digits"]) < MIN_PARTIAL_DIGITS]  # noise
+    """Give every code a position 1..max_slots (top = 1) using its vertical
+    place.
+
+    A card that was not read leaves a gap (it is NOT skipped), so numbering
+    never shifts.
+    Returns ({position: row}, [rows that did not fit anywhere],
+    positions_are_reliable).
+    """
+    # lines with too few digits are noise
+    extras = [r for r in rows if len(r["digits"]) < MIN_PARTIAL_DIGITS]
     rows = sorted((r for r in rows if len(r["digits"]) >= MIN_PARTIAL_DIGITS),
                   key=lambda r: r["y"])
     if not rows:
         return {}, extras, True
 
     diffs = [b["y"] - a["y"] for a, b in zip(rows, rows[1:])]
-    step = float(np.median(diffs)) if diffs else 0.0  # normal distance between cards
+    # normal distance between cards
+    step = float(np.median(diffs)) if diffs else 0.0
 
     if not spacing_is_regular(diffs, step):
-        # uneven strips: positions cannot show a missed card -> number them in order,
-        # and only trust it when the count is exactly the number of cards in the file name
+        # uneven strips: positions cannot show a missed card -> number them
+        # in order, and only trust it when the count is exactly the number
+        # of cards in the file name
         slots = {i: r for i, r in enumerate(rows, 1)}
         reliable = len(rows) == max_slots
     else:
@@ -294,28 +363,36 @@ def assign_slots(rows, max_slots, code_len):
         for r in rows[1:]:
             d = r["y"] - prev["y"]
             if step and d < 0.45 * step:  # same spot twice -> extra
-                if len(prev["digits"]) != code_len and len(r["digits"]) == code_len:
+                if (len(prev["digits"]) != code_len
+                        and len(r["digits"]) == code_len):
                     extras.append(prev)
                     slots[n] = prev = r
                 else:
                     extras.append(r)
                 continue
-            jump = 1 if (not step or d <= 1.3 * step) else max(2, round(d / step))
+            if not step or d <= 1.3 * step:
+                jump = 1
+            else:
+                jump = max(2, round(d / step))
             n += jump  # jump > 1 means a card was missed
             slots[n] = prev = r
 
-    for k in [k for k in slots if k > max_slots]:  # more cards than the file name says
+    # more cards than the file name says
+    for k in [k for k in slots if k > max_slots]:
         extras.append(slots.pop(k))
     return slots, extras, reliable
 
 
 def read_layout(items, width, layout, count, force_len):
-    """Read the codes of one card layout. Returns None when nothing was found."""
+    """Read the codes of one card layout. Returns None when nothing was
+    found."""
     x_from, x_to = LAYOUTS[layout]
-    rows, code_len = pick_column(find_rows(items, width, x_from, x_to), width, force_len)
+    rows, code_len = pick_column(
+        find_rows(items, width, x_from, x_to), width, force_len)
     if not rows:
         return None
-    for r in rows:  # too many digits on a line -> keep the pieces that fit the length
+    # too many digits on a line -> keep the pieces that fit the length
+    for r in rows:
         if len(r["digits"]) > code_len:
             r["digits"] = pick_code(r["tokens"], code_len)
     slots, extras, reliable = assign_slots(rows, count, code_len)
@@ -326,7 +403,8 @@ def read_layout(items, width, layout, count, force_len):
 
 
 def make_variants(big):
-    """The same photo in 3 versions, so a card colour that confuses the OCR can still be read."""
+    """The same photo in 3 versions, so a card colour that confuses the OCR
+    can still be read."""
     yield "original", big
     gray = cv2.cvtColor(big, cv2.COLOR_BGR2GRAY)
     eq = cv2.createCLAHE(clipLimit=3.0, tileGridSize=(8, 8)).apply(gray)
@@ -335,7 +413,10 @@ def make_variants(big):
 
 
 def parse_name(path):
-    """'81-100.jpg' -> (81, 20)  = (first counter, number of cards).  None if bad name."""
+    """'81-100.jpg' -> (81, 20)  = (first counter, number of cards).
+
+    Returns None if the name is bad.
+    """
     m = NAME_RE.match(path.stem)
     if not m:
         return None
@@ -346,10 +427,13 @@ def parse_name(path):
 
 
 def process(path, start, count, debug=False, layout=None, code_len=None):
+    """Read one image with every picture version and layout; return the
+    best result (see read_layout), or None if the image cannot be opened."""
     img = cv2.imread(str(path))
     if img is None:
         return None
-    big = cv2.resize(img, None, fx=UPSCALE, fy=UPSCALE, interpolation=cv2.INTER_CUBIC)
+    big = cv2.resize(img, None, fx=UPSCALE, fy=UPSCALE,
+                     interpolation=cv2.INTER_CUBIC)
     layout = layout or LAYOUT
     code_len = code_len or CODE_LEN
     layouts = list(LAYOUTS) if layout == "auto" else [layout]
@@ -362,23 +446,29 @@ def process(path, start, count, debug=False, layout=None, code_len=None):
             if res is None:
                 continue
             ok = res["reliable"]
-            # codes printed in groups first, then full-length codes, then the longer code
-            # (a window that cuts off the end of the codes gives shorter ones); tie = earlier
-            score = (min(res["grouped"], count) if ok else 0, min(res["good"], count) if ok else 0,
+            # codes printed in groups first, then full-length codes, then
+            # the longer code (a window that cuts off the end of the codes
+            # gives shorter ones); tie = earlier
+            score = (min(res["grouped"], count) if ok else 0,
+                     min(res["good"], count) if ok else 0,
                      res["good"], res["code_len"])
             if best is None or score > best_score:
                 best, best_score, res["variant"] = res, score, variant
         if best and best["good"] >= count and best["reliable"]:
             break  # everything was read - no need to try the other versions
     if best is None:
-        best = {"slots": {}, "extras": [], "reliable": True, "code_len": code_len or 0,
-                "layout": "-", "variant": "-", "good": 0}
+        best = {"slots": {}, "extras": [], "reliable": True,
+                "code_len": code_len or 0, "layout": "-", "variant": "-",
+                "good": 0}
 
     if debug:
+        # Draw the result on the picture: green = full code, red = partial,
+        # blue = extra detection.
         for k, r in best["slots"].items():
             x1, y1, x2, y2 = [int(v) for v in r["box"]]
             ok = len(r["digits"]) == best["code_len"]
-            cv2.rectangle(big, (x1, y1), (x2, y2), (0, 200, 0) if ok else (0, 0, 255), 3)
+            cv2.rectangle(big, (x1, y1), (x2, y2),
+                          (0, 200, 0) if ok else (0, 0, 255), 3)
             cv2.putText(big, str(start + k - 1), (max(x1 - 130, 0), y2),
                         cv2.FONT_HERSHEY_SIMPLEX, 1.6, (0, 255, 255), 4)
         for r in best["extras"]:
@@ -389,7 +479,9 @@ def process(path, start, count, debug=False, layout=None, code_len=None):
 
 
 def natural_key(p):
-    return [int(t) if t.isdigit() else t.lower() for t in re.split(r"(\d+)", p.name)]
+    """Sort key so that '2-5.jpg' comes before '10-15.jpg'."""
+    return [int(t) if t.isdigit() else t.lower()
+            for t in re.split(r"(\d+)", p.name)]
 
 
 def entries_from_files(files):
@@ -401,14 +493,25 @@ def entries_from_files(files):
     return entries
 
 
+def counter_order(record):
+    """Sort key for a record: its Counter, smallest first.
+
+    A row without a counter (bad file name) goes to the end.
+    """
+    counter = record[1]
+    return (counter == "", counter or 0)
+
+
 def build_records(entries, debug=False, layout=None, code_len=None):
-    """Return [[image, counter, code, status], ...] in entry order, top card first."""
+    """Return [[image, counter, code, status], ...] sorted by counter
+    (smallest first)."""
     records = []
     for e in entries:
         name, start, count = e.name, e.start, e.count
         if start is None:
             records.append([name, "", "", FAILED])
-            LOG.warning("%s: bad file name - use START-END.jpg (example 81-100.jpg)", name)
+            LOG.warning("%s: bad file name - use START-END.jpg "
+                        "(example 81-100.jpg)", name)
             continue
 
         res = process(e.path, start, count, debug, layout, code_len)
@@ -417,33 +520,46 @@ def build_records(entries, debug=False, layout=None, code_len=None):
                 records.append([name, start + k, "", FAILED])
             LOG.warning("%s: could not open image", name)
             continue
-        slots, extras, code_len_found = res["slots"], res["extras"], res["code_len"]
+        slots, extras = res["slots"], res["extras"]
+        code_len_found = res["code_len"]
 
         if slots and max(slots) < count and res["reliable"]:
             LOG.warning("  warning: %s - nothing found after counter %s; "
-                        "missing cards are assumed to be at the END of the stack",
-                        name, start + max(slots) - 1)
+                        "missing cards are assumed to be at the END of the "
+                        "stack", name, start + max(slots) - 1)
         if not res["reliable"]:
-            LOG.warning("  warning: %s - cards overlap with uneven spacing and %s "
-                        "codes were found, but the file name says %s. The counters cannot be "
-                        "trusted, so every row of this image is marked %s (check it with --debug)",
+            LOG.warning("  warning: %s - cards overlap with uneven spacing "
+                        "and %s codes were found, but the file name says "
+                        "%s. The counters cannot be trusted, so every row "
+                        "of this image is marked %s (check it with --debug)",
                         name, len(slots) + len(extras), count, FAILED)
         ok = 0
+        # One row for every card, even when its code was not read.
         for k in range(1, count + 1):
             r = slots.get(k)
             digits = r["digits"] if r else ""
-            good = bool(digits) and len(digits) == code_len_found and res["reliable"]
+            good = (bool(digits) and len(digits) == code_len_found
+                    and res["reliable"])
             ok += good
-            records.append([name, start + k - 1, digits, SUCCESS if good else FAILED])
+            records.append(
+                [name, start + k - 1, digits, SUCCESS if good else FAILED])
         LOG.info("%s: %s/%s codes read [layout=%s, %s digits, picture=%s]%s",
-                 name, ok, count, res["layout"], code_len_found, res["variant"],
-                 f", {len(extras)} extra detection(s) ignored" if extras else "")
+                 name, ok, count, res["layout"], code_len_found,
+                 res["variant"],
+                 f", {len(extras)} extra detection(s) ignored"
+                 if extras else "")
+    # Order the report by counter. sort() is stable, so rows with the same
+    # counter (overlapping ranges) keep the order the images were given.
+    records.sort(key=counter_order)
     return records
 
 
 def mark_repeated(records):
-    """Every succeeded row whose code appears more than once gets status 'repeated'.
-    Returns {code: [(image, counter), ...]} for the repeated codes."""
+    """Every succeeded row whose code appears more than once gets status
+    'repeated'.
+
+    Returns {code: [(image, counter), ...]} for the repeated codes.
+    """
     counts = Counter(r[2] for r in records if r[3] == SUCCESS)
     where = defaultdict(list)
     for r in records:
@@ -454,6 +570,7 @@ def mark_repeated(records):
 
 
 def build_workbook(records):
+    """Make the Excel workbook: a header row, then one row per record."""
     wb = Workbook()
     ws = wb.active
     ws.title = "Codes"
@@ -493,6 +610,7 @@ def workbook_bytes(records):
 
 
 def main():
+    """Command line: read a folder of images and write an .xlsx file."""
     logging.basicConfig(level=logging.INFO, format="%(message)s")
     args = [a for a in sys.argv[1:] if not a.startswith("--")]
     debug = "--debug" in sys.argv
@@ -501,16 +619,20 @@ def main():
         if a.startswith("--layout="):
             layout = a.split("=", 1)[1].strip().lower()
             if layout != "auto" and layout not in LAYOUTS:
-                sys.exit(f"Unknown layout '{layout}'. Use one of: auto, {', '.join(LAYOUTS)}")
+                sys.exit(f"Unknown layout '{layout}'. "
+                         f"Use one of: auto, {', '.join(LAYOUTS)}")
         elif a.startswith("--len="):
             code_len = int(a.split("=", 1)[1])
     folder = Path(args[0]) if args else Path(".")
-    out_file = Path(args[1] if len(args) > 1 else "results.xlsx").with_suffix(".xlsx")
-    files = sorted((p for p in folder.iterdir()
-                    if p.suffix.lower() in IMAGE_EXTS and not p.stem.endswith("_debug")),
-                   key=natural_key)
+    out_file = Path(
+        args[1] if len(args) > 1 else "results.xlsx").with_suffix(".xlsx")
+    files = sorted(
+        (p for p in folder.iterdir()
+         if p.suffix.lower() in IMAGE_EXTS and not p.stem.endswith("_debug")),
+        key=natural_key)
 
-    records = build_records(entries_from_files(files), debug, layout, code_len)
+    records = build_records(entries_from_files(files), debug, layout,
+                            code_len)
     repeated = mark_repeated(records)  # final check across ALL images
 
     try:
@@ -522,10 +644,11 @@ def main():
     if repeated:  # console only: the operator's own terminal
         print("\nREPEATED codes:")
         for code, places in repeated.items():
-            print(f"  {code}: " + ", ".join(f"{img} #{cnt}" for img, cnt in places))
+            print(f"  {code}: "
+                  + ", ".join(f"{img} #{cnt}" for img, cnt in places))
     stats = Counter(r[3] for r in records)
-    print(f"\nSaved {out_file}: {stats[SUCCESS]} succeeded, {stats[FAILED]} failed, "
-          f"{stats[REPEATED]} repeated")
+    print(f"\nSaved {out_file}: {stats[SUCCESS]} succeeded, "
+          f"{stats[FAILED]} failed, {stats[REPEATED]} repeated")
 
 
 if __name__ == "__main__":
